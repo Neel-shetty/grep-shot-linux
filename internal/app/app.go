@@ -1,80 +1,29 @@
 package app
 
 import (
-	"bufio"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/neel/grepShot/internal/db"
+	"github.com/otiai10/gosseract/v2"
 )
 
-type Config struct {
-	Pattern       string
-	Directory     string
-	CaseSensitive bool
-	WholeWord     bool
-	LineNumbers   bool
-	Count         bool
-	Recursive     bool
-	FilePattern   string
-	Context       int
-	MaxDepth      int
-	Exclude       string
-	Interactive   bool
-	LogLevel      string
-	Output        string
-}
-
 func Run() error {
-	config := parseFlags()
-
-	if err := setupLogging(config.LogLevel); err != nil {
+	if err := setupLogging(); err != nil {
 		return fmt.Errorf("failed to setup logging: %w", err)
 	}
 
-	if config.Interactive {
-		return runInteractiveMode(config)
-	}
-
-	return runSingleSearch(config)
+	return runOCRProcessing()
 }
 
-func parseFlags() *Config {
-	config := &Config{}
-
-	flag.StringVar(&config.Pattern, "p", "", "Pattern to search for (required)")
-	flag.StringVar(&config.Directory, "d", ".", "Directory to search in")
-	flag.BoolVar(&config.CaseSensitive, "c", false, "Case sensitive search")
-	flag.BoolVar(&config.WholeWord, "w", false, "Match whole words only")
-	flag.BoolVar(&config.LineNumbers, "n", false, "Show line numbers")
-	flag.BoolVar(&config.Count, "count", false, "Show only count of matches")
-	flag.BoolVar(&config.Recursive, "r", true, "Recursive search")
-	flag.StringVar(&config.FilePattern, "f", "", "File pattern to match")
-	flag.IntVar(&config.Context, "A", 0, "Show N lines after match")
-	flag.IntVar(&config.MaxDepth, "depth", -1, "Maximum directory depth")
-	flag.StringVar(&config.Exclude, "exclude", "", "Exclude pattern")
-	flag.BoolVar(&config.Interactive, "i", false, "Interactive mode")
-	flag.StringVar(&config.LogLevel, "log", "info", "Log level (debug, info, warn, error)")
-	flag.StringVar(&config.Output, "o", "", "Output file")
-
-	flag.Parse()
-
-	if !config.Interactive && config.Pattern == "" {
-		fmt.Println("Pattern is required. Use -p flag or -i for interactive mode.")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	return config
-}
-
-func setupLogging(level string) error {
+func setupLogging() error {
 	logDir := "logs"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return err
@@ -94,174 +43,143 @@ func setupLogging(level string) error {
 	return nil
 }
 
-func runInteractiveMode(config *Config) error {
-	scanner := bufio.NewScanner(os.Stdin)
+func runOCRProcessing() error {
+	// Define the screenshots directory path
+	screenshotsDir := "/home/neel/Pictures/Screenshots"
 
-	for {
-		fmt.Print("grepShot> ")
-		if !scanner.Scan() {
-			break
-		}
-
-		input := strings.TrimSpace(scanner.Text())
-		if input == "exit" || input == "quit" {
-			break
-		}
-
-		if input == "" {
-			continue
-		}
-
-		config.Pattern = input
-		if err := runSingleSearch(config); err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
-	}
-
-	return nil
-}
-
-func runSingleSearch(config *Config) error {
-	matches, err := performSearch(config)
+	// Check if directory exists
+	info, err := os.Stat(screenshotsDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("Directory does not exist: %s\n", screenshotsDir)
+			return err
+		}
+		log.Printf("Error accessing directory: %s\n", err)
 		return err
 	}
 
-	if err := db.SaveSearchHistory(config.Pattern, config.Directory, len(matches)); err != nil {
-		log.Printf("Failed to save search history: %v", err)
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", screenshotsDir)
 	}
 
-	return displayResults(matches, config)
-}
+	// Common image file extensions
+	imageExtensions := map[string]bool{
+		".jpg":  true,
+		".jpeg": true,
+		".png":  true,
+		".gif":  true,
+		".bmp":  true,
+		".webp": true,
+	}
 
-func performSearch(config *Config) ([]SearchResult, error) {
-	var results []SearchResult
+	// Create a thread-safe hashmap to store filepath and extracted text
+	var mu sync.Mutex
+	imageTextMap := make(map[string]string)
 
-	err := filepath.Walk(config.Directory, func(path string, info os.FileInfo, err error) error {
+	// Collect image paths first
+	var imagePaths []string
+	var count int
+
+	// Walk through the directory and collect image file paths
+	filepath.WalkDir(screenshotsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			log.Printf("Error accessing path %s: %v\n", path, err)
+			return nil
 		}
 
-		if info.IsDir() {
-			if shouldSkipDirectory(path, config) {
-				return filepath.SkipDir
+		if !d.IsDir() {
+			ext := strings.ToLower(filepath.Ext(path))
+			if imageExtensions[ext] {
+				imagePaths = append(imagePaths, path)
+				log.Println(d.Name())
+				count++
 			}
-			return nil
 		}
-
-		if !shouldSearchFile(path, config) {
-			return nil
-		}
-
-		matches, err := searchInFile(path, config)
-		if err != nil {
-			log.Printf("Error searching file %s: %v", path, err)
-			return nil
-		}
-
-		results = append(results, matches...)
 		return nil
 	})
 
-	return results, err
-}
+	// Create a worker pool for parallel processing
+	numWorkers := runtime.NumCPU() // Use number of available CPU cores
+	var wg sync.WaitGroup
 
-func shouldSkipDirectory(path string, config *Config) bool {
-	if config.MaxDepth >= 0 {
-		depth := strings.Count(strings.TrimPrefix(path, config.Directory), string(os.PathSeparator))
-		if depth > config.MaxDepth {
-			return true
-		}
-	}
+	// Process images in parallel
+	log.Println("\nExtracting text from images in parallel...")
+	log.Printf("Using %d worker goroutines (based on CPU count)\n", numWorkers)
 
-	if config.Exclude != "" {
-		matched, _ := regexp.MatchString(config.Exclude, filepath.Base(path))
-		return matched
-	}
+	// Create a channel to distribute work
+	jobs := make(chan string, len(imagePaths))
 
-	return false
-}
+	// Start worker goroutines
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
 
-func shouldSearchFile(path string, config *Config) bool {
-	if config.FilePattern != "" {
-		matched, _ := regexp.MatchString(config.FilePattern, filepath.Base(path))
-		if !matched {
-			return false
-		}
-	}
+			// Each worker gets its own Tesseract client
+			client := gosseract.NewClient()
+			defer client.Close()
 
-	return true
-}
+			for path := range jobs {
+				// Extract text from image using Tesseract
+				err := client.SetImage(path)
+				if err != nil {
+					log.Printf("Worker %d: Error setting image %s: %v\n", workerID, path, err)
+					continue
+				}
 
-func searchInFile(filePath string, config *Config) ([]SearchResult, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var results []SearchResult
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-
-	pattern := config.Pattern
-	if !config.CaseSensitive {
-		pattern = "(?i)" + pattern
-	}
-	if config.WholeWord {
-		pattern = "\\b" + pattern + "\\b"
-	}
-
-	regex, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil, err
-	}
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-
-		if regex.MatchString(line) {
-			result := SearchResult{
-				File:    filePath,
-				Line:    lineNum,
-				Content: line,
-				Match:   regex.FindString(line),
+				text, err := client.Text()
+				if err != nil {
+					log.Printf("Worker %d: Error extracting text from %s: %v\n", workerID, path, err)
+				} else {
+					// Store the extracted text in the hashmap with mutex protection
+					mu.Lock()
+					imageTextMap[path] = text
+					name := filepath.Base(path)
+					mu.Unlock()
+					log.Printf("Worker %d: Extracted %d characters of text from %s\n", workerID, len(text), name)
+				}
 			}
-			results = append(results, result)
-		}
+		}(w)
 	}
 
-	return results, scanner.Err()
-}
+	// Send jobs to the workers
+	for _, path := range imagePaths {
+		jobs <- path
+	}
+	close(jobs)
 
-func displayResults(results []SearchResult, config *Config) error {
-	if config.Count {
-		fmt.Printf("Total matches: %d\n", len(results))
-		return nil
+	// Wait for all workers to complete
+	wg.Wait()
+
+	log.Printf("\nFound %d image files in %s\n", count, screenshotsDir)
+
+	// Display the number of images with extracted text
+	log.Printf("\nSuccessfully extracted text from %d images\n", len(imageTextMap))
+
+	// Write the image path and text to a file
+	outputFile := filepath.Join(os.Getenv("HOME"), ".grepshot_data.json")
+	err = writeImageTextToFile(imageTextMap, outputFile)
+	if err != nil {
+		log.Printf("Error writing to file: %v\n", err)
+		return err
+	} else {
+		log.Printf("Image text data written to %s\n", outputFile)
 	}
 
-	var output strings.Builder
-
-	for _, result := range results {
-		if config.LineNumbers {
-			output.WriteString(fmt.Sprintf("%s:%d:%s\n", result.File, result.Line, result.Content))
-		} else {
-			output.WriteString(fmt.Sprintf("%s:%s\n", result.File, result.Content))
-		}
-	}
-
-	if config.Output != "" {
-		return os.WriteFile(config.Output, []byte(output.String()), 0644)
-	}
-
-	fmt.Print(output.String())
 	return nil
 }
 
-type SearchResult struct {
-	File    string
-	Line    int
-	Content string
-	Match   string
+// writeImageTextToFile writes the image path and extracted text to a JSON file
+func writeImageTextToFile(imageTextMap map[string]string, outputPath string) error {
+	// Create the output file
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Write the map as JSON
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(imageTextMap)
 }

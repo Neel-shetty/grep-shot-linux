@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/neel/grepShot/internal/app"
+	"grepShot/internal/app"
 )
 
 func main() {

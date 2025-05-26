@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/otiai10/gosseract/v2"
+	// tea "github.com/charmbracelet/bubbletea"
 )
 
 func Run() error {

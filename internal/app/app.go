@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
@@ -16,12 +17,39 @@ import (
 	// tea "github.com/charmbracelet/bubbletea"
 )
 
+type Config struct {
+	ScreenshotsDir string
+	OutputFile     string
+}
+
 func Run() error {
 	if err := setupLogging(); err != nil {
 		return fmt.Errorf("failed to setup logging: %w", err)
 	}
 
-	return runOCRProcessing()
+	config := parseFlags()
+	return runOCRProcessing(config)
+}
+
+func parseFlags() *Config {
+	var config Config
+
+	// Define command line flags
+	flag.StringVar(&config.ScreenshotsDir, "dir", "/home/neel/Pictures/Screenshots", "Path to screenshots directory")
+	flag.StringVar(&config.ScreenshotsDir, "d", "/home/neel/Pictures/Screenshots", "Path to screenshots directory (short)")
+
+	defaultOutput := filepath.Join(os.Getenv("HOME"), ".grepshot_data.json")
+	flag.StringVar(&config.OutputFile, "output", defaultOutput, "Output file path")
+	flag.StringVar(&config.OutputFile, "o", defaultOutput, "Output file path (short)")
+
+	flag.Parse()
+
+	// If output file is just a filename (no path), place it in HOME directory
+	if !strings.Contains(config.OutputFile, "/") {
+		config.OutputFile = filepath.Join(os.Getenv("HOME"), config.OutputFile)
+	}
+
+	return &config
 }
 
 func setupLogging() error {
@@ -44,15 +72,12 @@ func setupLogging() error {
 	return nil
 }
 
-func runOCRProcessing() error {
-	// Define the screenshots directory path
-	screenshotsDir := "/home/neel/Pictures/Screenshots"
-
+func runOCRProcessing(config *Config) error {
 	// Check if directory exists
-	info, err := os.Stat(screenshotsDir)
+	info, err := os.Stat(config.ScreenshotsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("Directory does not exist: %s\n", screenshotsDir)
+			log.Printf("Directory does not exist: %s\n", config.ScreenshotsDir)
 			return err
 		}
 		log.Printf("Error accessing directory: %s\n", err)
@@ -60,7 +85,7 @@ func runOCRProcessing() error {
 	}
 
 	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", screenshotsDir)
+		return fmt.Errorf("%s is not a directory", config.ScreenshotsDir)
 	}
 
 	// Common image file extensions
@@ -82,7 +107,7 @@ func runOCRProcessing() error {
 	var count int
 
 	// Walk through the directory and collect image file paths
-	filepath.WalkDir(screenshotsDir, func(path string, d fs.DirEntry, err error) error {
+	filepath.WalkDir(config.ScreenshotsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("Error accessing path %s: %v\n", path, err)
 			return nil
@@ -152,31 +177,17 @@ func runOCRProcessing() error {
 	// Wait for all workers to complete
 	wg.Wait()
 
-	log.Printf("\nFound %d image files in %s\n", count, screenshotsDir)
+	log.Printf("\nFound %d image files in %s\n", count, config.ScreenshotsDir)
 
 	// Display the number of images with extracted text
 	log.Printf("\nSuccessfully extracted text from %d images\n", len(imageTextMap))
 
-	// Get output file path from command line args or use default
-	var outputFile string
-	if len(os.Args) > 1 {
-		outputFile = os.Args[1]
-		// If it's just a filename (no path), place it in HOME directory
-		if !strings.Contains(outputFile, "/") {
-			outputFile = filepath.Join(os.Getenv("HOME"), outputFile)
-		}
-	} else {
-		// Default behavior
-		outputFileName := ".grepshot_data.json"
-		outputFile = filepath.Join(os.Getenv("HOME"), outputFileName)
-	}
-
-	err = writeImageTextToFile(imageTextMap, outputFile)
+	err = writeImageTextToFile(imageTextMap, config.OutputFile)
 	if err != nil {
 		log.Printf("Error writing to file: %v\n", err)
 		return err
 	} else {
-		log.Printf("Image text data written to %s\n", outputFile)
+		log.Printf("Image text data written to %s\n", config.OutputFile)
 	}
 
 	return nil

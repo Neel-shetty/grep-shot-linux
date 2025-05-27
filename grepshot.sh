@@ -8,6 +8,8 @@ set -euo pipefail
 GREPSHOT_DATA="$HOME/.grepshot_data.json"
 PREVIEW_WIDTH="60%"
 DELIMITER=" => "
+TRUNCATE_DISPLAY=false  # Set to true if you want truncation
+MAX_DISPLAY_LENGTH=100
 
 # Check if required tools are available
 for cmd in jq fzf kitty bat; do
@@ -59,11 +61,18 @@ export DELIMITER
 # Main execution
 main() {
     local selected_file
-    
+
+    # Then in the jq command:
+    if [[ "$TRUNCATE_DISPLAY" == "true" ]]; then
+        JQ_FILTER='to_entries[] | (.value | gsub("\n"; " ")[0:'$MAX_DISPLAY_LENGTH']) + "... => " + .key'
+    else
+        JQ_FILTER='to_entries[] | (.value | gsub("\n"; " ")) + " => " + .key'
+    fi
+
     # Process the JSON data and run fzf
     selected_file=$(
         cat "$GREPSHOT_DATA" \
-        | jq -r 'to_entries[] | (.value | gsub("\n"; " ")) + "... => " + .key' \
+        | jq -r "$JQ_FILTER" \
         | fzf \
             --delimiter="$DELIMITER" \
             --with-nth=1 \

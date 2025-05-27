@@ -157,8 +157,20 @@ func runOCRProcessing() error {
 	// Display the number of images with extracted text
 	log.Printf("\nSuccessfully extracted text from %d images\n", len(imageTextMap))
 
-	// Write the image path and text to a file
-	outputFile := filepath.Join(os.Getenv("HOME"), ".grepshot_data.json")
+	// Get output file path from command line args or use default
+	var outputFile string
+	if len(os.Args) > 1 {
+		outputFile = os.Args[1]
+		// If it's just a filename (no path), place it in HOME directory
+		if !strings.Contains(outputFile, "/") {
+			outputFile = filepath.Join(os.Getenv("HOME"), outputFile)
+		}
+	} else {
+		// Default behavior
+		outputFileName := ".grepshot_data.json"
+		outputFile = filepath.Join(os.Getenv("HOME"), outputFileName)
+	}
+
 	err = writeImageTextToFile(imageTextMap, outputFile)
 	if err != nil {
 		log.Printf("Error writing to file: %v\n", err)
